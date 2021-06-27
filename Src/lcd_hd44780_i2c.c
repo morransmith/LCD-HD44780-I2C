@@ -32,17 +32,26 @@
 
  */
 
-#include "stdlib.h"
-#include "string.h"
-#include "FreeRTOS.h"
-#include "task.h"
 #include "lcd_hd44780_i2c.h"
+#include <stdlib.h>
+#include <string.h>
 
-uint8_t lcdCommandBuffer[6] = {0x00};
+bool lcd_hd44780_backlight_on(lcd_hd44780_t* lcd) { return lcd_hd44780_backlight(lcd, LCD_BIT_BACKIGHT_ON); }
+bool lcd_hd44780_backlight_off(lcd_hd44780_t* lcd) { return lcd_hd44780_backlight(lcd, LCD_BIT_BACKIGHT_OFF); }
+bool lcd_hd44780_autoscroll_on(lcd_hd44780_t* lcd) { return lcd_hd44780_command(lcd, LCD_DISPLAY_SHIFT, LCD_PARAM_SET); }
+bool lcd_hd44780_autoscroll_off(lcd_hd44780_t* lcd) { return lcd_hd44780_command(lcd, LCD_DISPLAY_SHIFT, LCD_PARAM_UNSET); }
+bool lcd_hd44780_display_clear(lcd_hd44780_t* lcd) { return lcd_hd44780_command(lcd, LCD_CLEAR, LCD_PARAM_SET); }
+bool lcd_hd44780_display_on(lcd_hd44780_t* lcd) { return lcd_hd44780_command(lcd, LCD_DISPLAY, LCD_PARAM_SET); }
+bool lcd_hd44780_display_off(lcd_hd44780_t* lcd) { return lcd_hd44780_command(lcd, LCD_DISPLAY, LCD_PARAM_UNSET); }
+bool lcd_hd44780_cursor_on(lcd_hd44780_t* lcd) { return lcd_hd44780_command(lcd, LCD_CURSOR, LCD_PARAM_SET); }
+bool lcd_hd44780_cursor_off(lcd_hd44780_t* lcd) { return lcd_hd44780_command(lcd, LCD_CURSOR, LCD_PARAM_UNSET); }
+bool lcd_hd44780_blink_on(lcd_hd44780_t* lcd) { return lcd_hd44780_command(lcd, LCD_CURSOR_BLINK, LCD_PARAM_SET); }
+bool lcd_hd44780_blink_off(lcd_hd44780_t* lcd) { return lcd_hd44780_command(lcd, LCD_CURSOR_BLINK, LCD_PARAM_UNSET); }
+bool lcd_hd44780_cursor_dir_to_right(lcd_hd44780_t* lcd) { return lcd_hd44780_command(lcd, LCD_CURSOR_DIR_RIGHT, LCD_PARAM_SET); }
+bool lcd_hd44780_cursor_dir_to_left(lcd_hd44780_t* lcd) { return lcd_hd44780_command(lcd, LCD_CURSOR_DIR_LEFT, LCD_PARAM_SET); }
+bool lcd_hd44780_cursor_home(lcd_hd44780_t* lcd) { return lcd_hd44780_command(lcd, LCD_CURSOR_HOME, LCD_PARAM_SET); }
 
-static LCDParams lcdParams;
-
-static bool lcdWriteByte(uint8_t rsRwBits, uint8_t * data);
+static bool lcd_hd44780_write_byte(lcd_hd44780_t* lcd, uint8_t rs_rw_bits, uint8_t* data);
 
 /**
  * @brief  Turn display on and init it params
@@ -55,197 +64,182 @@ static bool lcdWriteByte(uint8_t rsRwBits, uint8_t * data);
  * @param  columns Number of colums
  * @return         true if success
  */
-bool lcdInit(I2C_HandleTypeDef *hi2c, uint8_t address, uint8_t lines, uint8_t columns) {
+bool lcd_hd44780_init(lcd_hd44780_t* lcd, uint8_t address, uint8_t lines, uint8_t columns)
+{
 
-    TickType_t xLastWakeTime;
+    uint8_t lcd_data = LCD_BIT_5x8DOTS;
 
-    uint8_t lcdData = LCD_BIT_5x8DOTS;
+    lcd->lcd_params.address = address << 1;
+    lcd->lcd_params.lines = lines;
+    lcd->lcd_params.columns = columns;
+    lcd->lcd_params.backlight = LCD_BIT_BACKIGHT_ON;
 
-    lcdParams.hi2c      = hi2c;
-    lcdParams.address   = address << 1;
-    lcdParams.lines     = lines;
-    lcdParams.columns   = columns;
-    lcdParams.backlight = LCD_BIT_BACKIGHT_ON;
+    memset(lcd->buffer, 0, sizeof(lcd->buffer));
 
-    lcdCommandBuffer[0] = LCD_BIT_E | (0x03 << 4);
-    lcdCommandBuffer[1] = lcdCommandBuffer[0];
-    lcdCommandBuffer[2] = (0x03 << 4);
+    lcd->buffer[0] = LCD_BIT_E | (0x03 << 4);
+    lcd->buffer[1] = lcd->buffer[0];
+    lcd->buffer[2] = (0x03 << 4);
 
     /* First 3 steps of init cycles. They are the same. */
     for (uint8_t i = 0; i < 3; ++i) {
-        if (HAL_I2C_Master_Transmit_DMA(lcdParams.hi2c, lcdParams.address, (uint8_t*)lcdCommandBuffer, 3) != HAL_OK) {
+        if (lcd->transmit(lcd->lcd_params.address, (uint8_t*)lcd->buffer, 3))
             return false;
-        }
 
-        xLastWakeTime = xTaskGetTickCount();
-
-        while (HAL_I2C_GetState(lcdParams.hi2c) != HAL_I2C_STATE_READY) {
-            vTaskDelay(1);
-        }
-
-        if (i == 2) {
-            // For the last cycle delay is less then 1 ms (100us by datasheet)
-            vTaskDelayUntil(&xLastWakeTime, (TickType_t)1);
-        } else {
+        if (i != 2)
             // For first 2 cycles delay is less then 5ms (4100us by datasheet)
-            vTaskDelayUntil(&xLastWakeTime, (TickType_t)5);
-        }
+            lcd->delay(5);
+        else
+            // For the last cycle delay is less then 1 ms (100us by datasheet)
+            lcd->delay(1);
     }
 
     /* Lets turn to 4-bit at least */
-    lcdCommandBuffer[0] = LCD_BIT_BACKIGHT_ON | LCD_BIT_E | (LCD_MODE_4BITS << 4);
-    lcdCommandBuffer[1] = lcdCommandBuffer[0];
-    lcdCommandBuffer[2] = LCD_BIT_BACKIGHT_ON | (LCD_MODE_4BITS << 4);
-
-    if (HAL_I2C_Master_Transmit_DMA(lcdParams.hi2c, lcdParams.address, (uint8_t*)lcdCommandBuffer, 3) != HAL_OK) {
+    lcd->buffer[0] = LCD_BIT_BACKIGHT_ON | LCD_BIT_E | (LCD_MODE_4BITS << 4);
+    lcd->buffer[1] = lcd->buffer[0];
+    lcd->buffer[2] = LCD_BIT_BACKIGHT_ON | (LCD_MODE_4BITS << 4);
+    if (lcd->transmit(lcd->lcd_params.address, (uint8_t*)lcd->buffer, 3))
         return false;
-    }
-
-    while (HAL_I2C_GetState(lcdParams.hi2c) != HAL_I2C_STATE_READY) {
-        vTaskDelay(1);
-    }
 
     /* Lets set display params */
     /* First of all lets set display size */
-    lcdData |= LCD_MODE_4BITS;
+    lcd_data |= LCD_MODE_4BITS;
 
-    if (lcdParams.lines > 1) {
-        lcdData |= LCD_BIT_2LINE;
+    if (lcd->lcd_params.lines > 1) {
+        lcd_data |= LCD_BIT_2LINE;
     }
 
-    lcdWriteByte((uint8_t)0x00, &lcdData);  // TODO: Make 5x10 dots font usable for some 1-line display
+    lcd_hd44780_write_byte(lcd, 0x00, &lcd_data); // TODO: Make 5x10 dots font usable for some 1-line display
 
     /* Now lets set display, cursor and blink all on */
-    lcdDisplayOn();
+    lcd_hd44780_display_on(lcd);
 
     /* Set cursor moving to the right */
-    lcdCursorDirToRight();
+    lcd_hd44780_cursor_dir_to_right(lcd);
 
     /* Clear display and Set cursor at Home */
-    lcdDisplayClear();
-    lcdCursorHome();
+    lcd_hd44780_display_clear(lcd);
+    lcd_hd44780_cursor_home(lcd);
 
     return true;
 }
 
 /**
  * @brief  Send command to display
- * @param  command  One of listed in LCDCommands enum
+ * @param  command  One of listed in lcd_hd44780_commands enum
  * @param  action   LCD_PARAM_SET or LCD_PARAM_UNSET
  * @return          true if success
  */
-bool lcdCommand(LCDCommands command, LCDParamsActions action) {
-    uint8_t lcdData = 0x00;
+bool lcd_hd44780_command(lcd_hd44780_t* lcd, lcd_hd44780_commands command, lcd_hd44780_params_action action)
+{
+    uint8_t lcd_data = 0x00;
 
     /* First of all lest store the command */
     switch (action) {
-        case LCD_PARAM_SET:
-            switch (command) {
-                case LCD_DISPLAY:
-                    lcdParams.modeBits |=  LCD_BIT_DISPLAY_ON;
-                    break;
-
-                case LCD_CURSOR:
-                    lcdParams.modeBits |= LCD_BIT_CURSOR_ON;
-                    break;
-
-                case LCD_CURSOR_BLINK:
-                    lcdParams.modeBits |= LCD_BIT_BLINK_ON;
-                    break;
-
-                case LCD_CLEAR:
-                    lcdData = LCD_BIT_DISP_CLEAR;
-
-                    if (lcdWriteByte((uint8_t)0x00, &lcdData) == false) {
-                        return false;
-                    } else {
-                        vTaskDelay(2);
-                        return true;
-                    }
-
-                case LCD_CURSOR_HOME:
-                    lcdData = LCD_BIT_CURSOR_HOME;
-
-                    if (lcdWriteByte((uint8_t)0x00, &lcdData) == false) {
-                        return false;
-                    } else {
-                        vTaskDelay(2);
-                        return true;
-                    }
-
-                case LCD_CURSOR_DIR_RIGHT:
-                    lcdParams.entryBits |= LCD_BIT_CURSOR_DIR_RIGHT;
-                    break;
-
-                case LCD_CURSOR_DIR_LEFT:
-                    lcdParams.entryBits |= LCD_BIT_CURSOR_DIR_LEFT;
-                    break;
-
-                case LCD_DISPLAY_SHIFT:
-                    lcdParams.entryBits |= LCD_BIT_DISPLAY_SHIFT;
-                    break;
-
-                default:
-                    return false;
-            }
-
+    case LCD_PARAM_SET:
+        switch (command) {
+        case LCD_DISPLAY:
+            lcd->lcd_params.mode_bits |= LCD_BIT_DISPLAY_ON;
             break;
 
-        case LCD_PARAM_UNSET:
-            switch (command) {
-                case LCD_DISPLAY:
-                    lcdParams.modeBits &= ~LCD_BIT_DISPLAY_ON;
-                    break;
+        case LCD_CURSOR:
+            lcd->lcd_params.mode_bits |= LCD_BIT_CURSOR_ON;
+            break;
 
-                case LCD_CURSOR:
-                    lcdParams.modeBits &= ~LCD_BIT_CURSOR_ON;
-                    break;
+        case LCD_CURSOR_BLINK:
+            lcd->lcd_params.mode_bits |= LCD_BIT_BLINK_ON;
+            break;
 
-                case LCD_CURSOR_BLINK:
-                    lcdParams.modeBits &= ~LCD_BIT_BLINK_ON;
-                    break;
+        case LCD_CLEAR:
+            lcd_data = LCD_BIT_DISP_CLEAR;
 
-                case LCD_CURSOR_DIR_RIGHT:
-                    lcdParams.entryBits &= ~LCD_BIT_CURSOR_DIR_RIGHT;
-                    break;
+            if (!lcd_hd44780_write_byte(lcd, 0x00, &lcd_data))
+                return false;
 
-                case LCD_CURSOR_DIR_LEFT:
-                    lcdParams.entryBits &= ~LCD_BIT_CURSOR_DIR_LEFT;
-                    break;
+            lcd->delay(2);
+            return true;
 
-                case LCD_DISPLAY_SHIFT:
-                    lcdParams.entryBits &= ~LCD_BIT_DISPLAY_SHIFT;
-                    break;
+        case LCD_CURSOR_HOME:
+            lcd_data = LCD_BIT_CURSOR_HOME;
 
-                default:
-                    return false;
-            }
+            if (!lcd_hd44780_write_byte(lcd, 0x00, &lcd_data))
+                return false;
 
+            lcd->delay(2);
+            return true;
+
+        case LCD_CURSOR_DIR_RIGHT:
+            lcd->lcd_params.entry_bits |= LCD_BIT_CURSOR_DIR_RIGHT;
+            break;
+
+        case LCD_CURSOR_DIR_LEFT:
+            lcd->lcd_params.entry_bits |= LCD_BIT_CURSOR_DIR_LEFT;
+            break;
+
+        case LCD_DISPLAY_SHIFT:
+            lcd->lcd_params.entry_bits |= LCD_BIT_DISPLAY_SHIFT;
             break;
 
         default:
             return false;
+        }
+
+        break;
+
+    case LCD_PARAM_UNSET:
+        switch (command) {
+        case LCD_DISPLAY:
+            lcd->lcd_params.mode_bits &= ~LCD_BIT_DISPLAY_ON;
+            break;
+
+        case LCD_CURSOR:
+            lcd->lcd_params.mode_bits &= ~LCD_BIT_CURSOR_ON;
+            break;
+
+        case LCD_CURSOR_BLINK:
+            lcd->lcd_params.mode_bits &= ~LCD_BIT_BLINK_ON;
+            break;
+
+        case LCD_CURSOR_DIR_RIGHT:
+            lcd->lcd_params.entry_bits &= ~LCD_BIT_CURSOR_DIR_RIGHT;
+            break;
+
+        case LCD_CURSOR_DIR_LEFT:
+            lcd->lcd_params.entry_bits &= ~LCD_BIT_CURSOR_DIR_LEFT;
+            break;
+
+        case LCD_DISPLAY_SHIFT:
+            lcd->lcd_params.entry_bits &= ~LCD_BIT_DISPLAY_SHIFT;
+            break;
+
+        default:
+            return false;
+        }
+
+        break;
+
+    default:
+        return false;
     }
 
     /* Now lets send the command */
     switch (command) {
-        case LCD_DISPLAY:
-        case LCD_CURSOR:
-        case LCD_CURSOR_BLINK:
-            lcdData = LCD_BIT_DISPLAY_CONTROL | lcdParams.modeBits;
-            break;
+    case LCD_DISPLAY:
+    case LCD_CURSOR:
+    case LCD_CURSOR_BLINK:
+        lcd_data = LCD_BIT_DISPLAY_CONTROL | lcd->lcd_params.mode_bits;
+        break;
 
-        case LCD_CURSOR_DIR_RIGHT:
-        case LCD_CURSOR_DIR_LEFT:
-        case LCD_DISPLAY_SHIFT:
-            lcdData = LCD_BIT_ENTRY_MODE | lcdParams.entryBits;
-            break;
+    case LCD_CURSOR_DIR_RIGHT:
+    case LCD_CURSOR_DIR_LEFT:
+    case LCD_DISPLAY_SHIFT:
+        lcd_data = LCD_BIT_ENTRY_MODE | lcd->lcd_params.entry_bits;
+        break;
 
-        default:
-            break;
+    default:
+        break;
     }
 
-    return lcdWriteByte((uint8_t)0x00, &lcdData);
+    return lcd_hd44780_write_byte(lcd, 0x00, &lcd_data);
 }
 
 /**
@@ -254,16 +248,12 @@ bool lcdCommand(LCDCommands command, LCDParamsActions action) {
  *                 LCD_BIT_BACKIGHT_OFF (or 0x00) to turn display Off
  * @return         true if success
  */
-bool lcdBacklight(uint8_t command) {
-    lcdParams.backlight = command;
+bool lcd_hd44780_backlight(lcd_hd44780_t* lcd, uint8_t command)
+{
+    lcd->lcd_params.backlight = command;
 
-    if (HAL_I2C_Master_Transmit_DMA(lcdParams.hi2c, lcdParams.address, &lcdParams.backlight, 1) != HAL_OK) {
+    if (lcd->transmit(lcd->lcd_params.address, &lcd->lcd_params.backlight, 1))
         return false;
-    }
-
-    while (HAL_I2C_GetState(lcdParams.hi2c) != HAL_I2C_STATE_READY) {
-        vTaskDelay(1);
-    }
 
     return true;
 }
@@ -274,17 +264,17 @@ bool lcdBacklight(uint8_t command) {
  * @param  line   counting from 0
  * @return        true if success
  */
-bool lcdSetCursorPosition(uint8_t column, uint8_t line) {
+bool lcd_hd44780_set_cursor_position(lcd_hd44780_t* lcd, uint8_t column, uint8_t line)
+{
     // We will setup offsets for 4 lines maximum
-    static const uint8_t lineOffsets[4] = { 0x00, 0x40, 0x14, 0x54 };
+    static const uint8_t line_offsets[4] = { 0x00, 0x40, 0x14, 0x54 };
 
-    if ( line >= lcdParams.lines ) {
-        line = lcdParams.lines - 1;
-    }
+    if (line >= lcd->lcd_params.lines)
+        line = lcd->lcd_params.lines - 1;
 
-    uint8_t lcdCommand = LCD_BIT_SETDDRAMADDR | (column + lineOffsets[line]);
+    uint8_t lcd_command = LCD_BIT_SETDDRAMADDR | (column + line_offsets[line]);
 
-    return lcdWriteByte(0x00, &lcdCommand);
+    return lcd_hd44780_write_byte(lcd, 0x00, &lcd_command);
 }
 
 /**
@@ -293,12 +283,11 @@ bool lcdSetCursorPosition(uint8_t column, uint8_t line) {
  * @param  length Number of symbols to print
  * @return        true if success
  */
-bool lcdPrintStr(uint8_t * data, uint8_t length) {
-    for (uint8_t i = 0; i < length; ++i) {
-        if (lcdWriteByte(LCD_BIT_RS, &data[i]) == false) {
+bool lcd_hd44780_print_str(lcd_hd44780_t* lcd, uint8_t* data, uint8_t length)
+{
+    for (uint8_t i = 0; i < length; ++i)
+        if (!lcd_hd44780_write_byte(lcd, LCD_BIT_RS, &data[i]))
             return false;
-        }
-    }
 
     return true;
 }
@@ -308,10 +297,10 @@ bool lcdPrintStr(uint8_t * data, uint8_t length) {
  * @param  data Symbol to print
  * @return      true if success
  */
-bool lcdPrintChar(uint8_t data) {
-    return lcdWriteByte(LCD_BIT_RS, &data);
+bool lcd_hd44780_print_char(lcd_hd44780_t* lcd, uint8_t data)
+{
+    return lcd_hd44780_write_byte(lcd, LCD_BIT_RS, &data);
 }
-
 
 /**
  * @brief Loading custom Chars to one of the 8 cells in CGRAM
@@ -320,58 +309,52 @@ bool lcdPrintChar(uint8_t data) {
  *        It consists of array of 8 bytes.
  *        Each byte is line of dots. Lower bits are dots.
  * @param  cell     Number of cell from 0 to 7 where to upload
- * @param  charMap  Pointer to Array of dots
+ * @param  char_map  Pointer to Array of dots
  *                  Example: { 0x07, 0x09, 0x09, 0x09, 0x09, 0x1F, 0x11 }
  * @return          true if success
  */
-bool lcdLoadCustomChar(uint8_t cell, uint8_t * charMap) {
+bool lcd_hd44780_load_custom_char(lcd_hd44780_t* lcd, uint8_t cell, uint8_t* char_map)
+{
 
     // Stop, if trying to load to incorrect cell
-    if (cell > 7) {
+    if (cell > 7)
         return false;
-    }
 
-    uint8_t lcdCommand = LCD_BIT_SETCGRAMADDR | (cell << 3);
+    uint8_t lcd_command = LCD_BIT_SETCGRAMADDR | (cell << 3);
 
-    if (lcdWriteByte((uint8_t)0x00, &lcdCommand) == false) {
+    if (!lcd_hd44780_write_byte(lcd, 0x00, &lcd_command))
         return false;
-    }
 
-    for (uint8_t i = 0; i < 8; ++i) {
-        if (lcdWriteByte(LCD_BIT_RS, &charMap[i]) == false) {
+    for (uint8_t i = 0; i < 8; ++i)
+        if (!lcd_hd44780_write_byte(lcd, LCD_BIT_RS, &char_map[i]) == false)
             return false;
-        }
-    }
 
     return true;
 }
 
 /**
  * @brief  Local function to send data to display
- * @param  rsRwBits State of RS and R/W bits
+ * @param  rs_rw_bits State of RS and R/W bits
  * @param  data     Pointer to byte to send
  * @return          true if success
  */
-static bool lcdWriteByte(uint8_t rsRwBits, uint8_t * data) {
+static bool lcd_hd44780_write_byte(lcd_hd44780_t* lcd, uint8_t rs_rw_bits, uint8_t* data)
+{
 
     /* Higher 4 bits*/
-    lcdCommandBuffer[0] = rsRwBits | LCD_BIT_E | lcdParams.backlight | (*data & 0xF0);  // Send data and set strobe
-    lcdCommandBuffer[1] = lcdCommandBuffer[0];                                          // Strobe turned on
-    lcdCommandBuffer[2] = rsRwBits | lcdParams.backlight | (*data & 0xF0);              // Turning strobe off
+    lcd->buffer[0] = rs_rw_bits | LCD_BIT_E | lcd->lcd_params.backlight | (*data & 0xF0); // Send data and set strobe
+    lcd->buffer[1] = lcd->buffer[0]; // Strobe turned on
+    lcd->buffer[2] = rs_rw_bits | lcd->lcd_params.backlight | (*data & 0xF0); // Turning strobe off
 
     /* Lower 4 bits*/
-    lcdCommandBuffer[3] = rsRwBits | LCD_BIT_E | lcdParams.backlight | ((*data << 4) & 0xF0);  // Send data and set strobe
-    lcdCommandBuffer[4] = lcdCommandBuffer[3];                                                 // Strobe turned on
-    lcdCommandBuffer[5] = rsRwBits | lcdParams.backlight | ((*data << 4) & 0xF0);              // Turning strobe off
+    lcd->buffer[3] = rs_rw_bits | LCD_BIT_E | lcd->lcd_params.backlight | ((*data << 4) & 0xF0); // Send data and set strobe
+    lcd->buffer[4] = lcd->buffer[3]; // Strobe turned on
+    lcd->buffer[5] = rs_rw_bits | lcd->lcd_params.backlight | ((*data << 4) & 0xF0); // Turning strobe off
 
-
-    if (HAL_I2C_Master_Transmit_DMA(lcdParams.hi2c, lcdParams.address, (uint8_t*)lcdCommandBuffer, 6) != HAL_OK) {
+    if (lcd->transmit(lcd->lcd_params.address, (uint8_t*)lcd->buffer, 6))
         return false;
-    }
 
-    while (HAL_I2C_GetState(lcdParams.hi2c) != HAL_I2C_STATE_READY) {
-        vTaskDelay(1);
-    }
+    lcd->delay(1);
 
     return true;
 }
